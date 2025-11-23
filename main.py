@@ -5,8 +5,8 @@ import os
 from datetime import datetime, timezone
 from flask import Flask
 import threading
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+import sqlite3
+from pathlib import Path
 
 app = Flask(__name__)
 
@@ -24,113 +24,64 @@ def run_web():
 # --- CONFIGURACIÓN ---
 FORUM_URL = "https://forums.ea.com/category/star-wars-galaxy-of-heroes-en/blog/swgoh-game-info-hub-en"
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
-MONGODB_URI = os.getenv('MONGODB_URI', '')
 CHECK_INTERVAL = 300
 
-# --- Conexión a MongoDB ---
-db = None
-sent_collection = None
+# Usar /data si existe (Render Disk), sino usar directorio local
+DB_DIR = "/data" if os.path.exists("/data") else "."
+DB_PATH = os.path.join(DB_DIR, "swgoh_news.db")
 
+print(f"📁 Usando base de datos en: {DB_PATH}")
+
+# --- Funciones de base de datos SQLite ---
 def init_database():
-    """Inicializa la conexión a MongoDB"""
-    global db, sent_collection
-    
-    print(f"🔍 Intentando conectar a MongoDB...")
-    print(f"   URI configurada: {'Sí' if MONGODB_URI else 'No'}")
-    
-    if not MONGODB_URI:
-        print("⚠️ MONGODB_URI no configurada. Usando modo fallback (memoria).")
-        return False
-    
-    # Mostrar parte de la URI (censurando password)
-    safe_uri = MONGODB_URI[:20] + "***" + MONGODB_URI[-30:] if len(MONGODB_URI) > 50 else "URI muy corta"
-    print(f"   URI (parcial): {safe_uri}")
-    
-    # Usar threading para timeout manual
-    import queue
-    result_queue = queue.Queue()
-    
-    def connect_with_timeout():
-        try:
-            print("   [Thread] Creando cliente MongoDB...")
-            client = MongoClient(
-                MONGODB_URI, 
-                serverSelectionTimeoutMS=8000,
-                connectTimeoutMS=8000,
-                socketTimeoutMS=8000
-            )
-            
-            print("   [Thread] Verificando conexión (ping)...")
-            ping_result = client.admin.command('ping')
-            print(f"   [Thread] Ping exitoso: {ping_result}")
-            
-            print("   [Thread] Seleccionando base de datos...")
-            temp_db = client['swgoh_bot']
-            temp_collection = temp_db['sent_news']
-            
-            print("   [Thread] Creando índice...")
-            temp_collection.create_index("post_id", unique=True)
-            
-            result_queue.put(("success", client, temp_db, temp_collection))
-        except Exception as e:
-            result_queue.put(("error", e, None, None))
-    
-    print("   Iniciando thread de conexión...")
-    thread = threading.Thread(target=connect_with_timeout, daemon=True)
-    thread.start()
-    
-    print("   Esperando respuesta (máximo 12 segundos)...")
-    thread.join(timeout=12)
-    
-    if thread.is_alive():
-        print("⏱️ TIMEOUT: La conexión tardó más de 12 segundos")
-        print("   Posibles causas:")
-        print("   1. Network Access en MongoDB no permite 0.0.0.0/0")
-        print("   2. El cluster no está disponible")
-        print("   3. Firewall de Render bloqueando la conexión")
-        print("   Continuando sin base de datos...")
-        return False
-    
+    """Inicializa la base de datos SQLite"""
     try:
-        status, result1, result2, result3 = result_queue.get_nowait()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        if status == "success":
-            db = result2
-            sent_collection = result3
-            print("✅ Conectado a MongoDB correctamente")
-            return True
-        else:
-            print(f"❌ Error al conectar: {result1}")
-            print(f"   Tipo: {type(result1).__name__}")
-            return False
-    except queue.Empty:
-        print("❌ No se recibió respuesta del thread de conexión")
+        # Crear tabla si no existe
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sent_news (
+                post_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                link TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"✅ Base de datos inicializada correctamente")
+        return True
+    except Exception as e:
+        print(f"❌ Error al inicializar base de datos: {e}")
         return False
 
-# --- Funciones de persistencia con MongoDB ---
 def is_post_sent(post_id):
     """Verifica si un post ya fue enviado"""
-    if sent_collection is None:
-        return False
-    
     try:
-        return sent_collection.find_one({"post_id": post_id}) is not None
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM sent_news WHERE post_id = ?", (post_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
     except Exception as e:
         print(f"❌ Error al verificar post: {e}")
         return False
 
 def mark_post_as_sent(post_id, title, link):
     """Marca un post como enviado"""
-    if sent_collection is None:
-        return False
-    
     try:
-        sent_collection.insert_one({
-            "post_id": post_id,
-            "title": title,
-            "link": link,
-            "sent_at": datetime.now(timezone.utc)
-        })
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO sent_news (post_id, title, link) VALUES (?, ?, ?)",
+            (post_id, title, link)
+        )
+        conn.commit()
+        conn.close()
         return True
     except Exception as e:
         print(f"❌ Error al guardar post: {e}")
@@ -138,61 +89,49 @@ def mark_post_as_sent(post_id, title, link):
 
 def cleanup_old_posts():
     """Limpia posts antiguos (mantiene solo los últimos 100)"""
-    if sent_collection is None:
-        return
-    
     try:
-        count = sent_collection.count_documents({})
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Contar posts
+        cursor.execute("SELECT COUNT(*) FROM sent_news")
+        count = cursor.fetchone()[0]
+        
         if count > 100:
-            # Obtener los 100 más recientes
-            recent = list(sent_collection.find().sort("sent_at", -1).limit(100))
-            recent_ids = [doc["_id"] for doc in recent]
-            
-            # Eliminar el resto
-            sent_collection.delete_many({"_id": {"$nin": recent_ids}})
-            print(f"🧹 Limpieza: eliminados {count - 100} posts antiguos")
+            # Eliminar los más antiguos
+            cursor.execute('''
+                DELETE FROM sent_news 
+                WHERE post_id NOT IN (
+                    SELECT post_id FROM sent_news 
+                    ORDER BY sent_at DESC 
+                    LIMIT 100
+                )
+            ''')
+            deleted = cursor.rowcount
+            conn.commit()
+            print(f"🧹 Limpieza: eliminados {deleted} posts antiguos")
+        
+        conn.close()
     except Exception as e:
         print(f"❌ Error en limpieza: {e}")
 
-# --- Envío a Discord ---
-def send_to_discord(title, link, summary=""):
-    """Envía notificación a Discord"""
-    if not DISCORD_WEBHOOK_URL:
-        print("⚠️ No has configurado el webhook de Discord")
-        return False
-
-    payload = {
-        "content": "⚠️ ¡¡<@&745741680430546954> hay nueva noticia de SWGOH!! ⚠️",
-        "embeds": [{
-            "title": title,
-            "url": link,
-            "description": summary[:2000] if summary else "Nueva noticia de SWGOH",
-            "color": 3447003,
-            "footer": {"text": "SWGOH - Game Info Hub"},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }]
-    }
-
+def get_post_count():
+    """Obtiene el número de posts guardados"""
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        if response.status_code in (200, 204):
-            print(f"✅ Enviado a Discord: {title}")
-            return True
-        else:
-            print(f"❌ Error al enviar a Discord: {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ Error al enviar a Discord: {e}")
-        return False
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sent_news")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except:
+        return 0
 
 # --- Inicialización: marcar noticias actuales como leídas ---
 def initialize_existing_news():
     """Marca las noticias actuales del foro como ya leídas sin enviarlas"""
-    if sent_collection is None:
-        return
+    count = get_post_count()
     
-    # Verificar si ya hay datos en la base de datos
-    count = sent_collection.count_documents({})
     if count > 0:
         print(f"📊 Base de datos ya tiene {count} noticias registradas")
         return
@@ -224,6 +163,37 @@ def initialize_existing_news():
         print(f"  ✓ Marcada: {title}")
     
     print(f"✅ {len(posts)} noticias marcadas como leídas (no enviadas)\n")
+
+# --- Envío a Discord ---
+def send_to_discord(title, link, summary=""):
+    """Envía notificación a Discord"""
+    if not DISCORD_WEBHOOK_URL:
+        print("⚠️ No has configurado el webhook de Discord")
+        return False
+
+    payload = {
+        "content": "⚠️ ¡¡<@745741680430546954> hay nueva noticia de SWGOH!! ⚠️",
+        "embeds": [{
+            "title": title,
+            "url": link,
+            "description": summary[:2000] if summary else "Nueva noticia de SWGOH",
+            "color": 3447003,
+            "footer": {"text": "SWGOH - Game Info Hub"},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }]
+    }
+
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        if response.status_code in (200, 204):
+            print(f"✅ Enviado a Discord: {title}")
+            return True
+        else:
+            print(f"❌ Error al enviar a Discord: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Error al enviar a Discord: {e}")
+        return False
 
 # --- Revisión del foro ---
 def fetch_and_send_news():
@@ -284,13 +254,13 @@ def bot_loop():
     print(f"⏰ Revisando cada {CHECK_INTERVAL} segundos")
     
     # Inicializar base de datos
-    db_connected = init_database()
+    db_ok = init_database()
     
-    if not db_connected:
-        print("⚠️ Continuando sin base de datos (solo para testing)")
-    else:
+    if db_ok:
         # Si es la primera vez, marcar noticias actuales como leídas
         initialize_existing_news()
+    else:
+        print("⚠️ No se pudo inicializar la base de datos")
     
     print("\n" + "="*50 + "\n")
 
