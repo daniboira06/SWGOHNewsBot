@@ -24,16 +24,7 @@ def run_web():
 # --- CONFIGURACIÓN ---
 FORUM_URL = "https://forums.ea.com/category/star-wars-galaxy-of-heroes-en/blog/swgoh-game-info-hub-en"
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
-
-# Intentar obtener MONGODB_URI de diferentes formas
 MONGODB_URI = os.getenv('MONGODB_URI', '')
-if not MONGODB_URI:
-    MONGODB_URI = os.environ.get('MONGODB_URI', '')
-
-print(f"🔧 DEBUG: MONGODB_URI desde os.getenv: {'configurada' if os.getenv('MONGODB_URI') else 'vacía'}")
-print(f"🔧 DEBUG: MONGODB_URI desde os.environ: {'configurada' if os.environ.get('MONGODB_URI') else 'vacía'}")
-print(f"🔧 DEBUG: Todas las variables de entorno: {list(os.environ.keys())}")
-
 CHECK_INTERVAL = 300
 
 # --- Conexión a MongoDB ---
@@ -65,7 +56,8 @@ def init_database():
         )
         
         print("   Verificando conexión (ping)...")
-        client.admin.command('ping')
+        result = client.admin.command('ping')
+        print(f"   Ping exitoso: {result}")
         
         print("   Seleccionando base de datos...")
         db = client['swgoh_bot']
@@ -84,6 +76,7 @@ def init_database():
         print(f"❌ Error inesperado con MongoDB: {e}")
         print(f"   Tipo de error: {type(e).__name__}")
         import traceback
+        print("   Traceback completo:")
         traceback.print_exc()
         return False
 
@@ -293,4 +286,3 @@ if __name__ == "__main__":
     
     # Ejecutar el bot en el thread principal
     bot_loop()
-
