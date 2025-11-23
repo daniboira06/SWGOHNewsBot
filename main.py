@@ -12,11 +12,25 @@ FORUM_URL = "https://forums.ea.com/category/star-wars-galaxy-of-heroes-en/blog/s
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # Variables de entorno para Postgres
-PG_HOST = os.getenv("PG_HOST", "localhost")
-PG_PORT = int(os.getenv("PG_PORT", 5432))
-PG_DB = os.getenv("PG_DB", "swgoh")
-PG_USER = os.getenv("PG_USER", "postgres")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+import os
+from urllib.parse import urlparse
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL:
+    result = urlparse(DATABASE_URL)
+    PG_HOST = result.hostname
+    PG_PORT = result.port or 5432
+    PG_DB = result.path.lstrip('/')
+    PG_USER = result.username
+    PG_PASSWORD = result.password
+else:
+    # Valores por defecto para pruebas locales si quieres
+    PG_HOST = "localhost"
+    PG_PORT = 5432
+    PG_DB = "swgoh"
+    PG_USER = "postgres"
+    PG_PASSWORD = ""
 
 # --- Flask ---
 app = Flask(__name__)
