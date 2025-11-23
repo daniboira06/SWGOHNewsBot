@@ -30,7 +30,7 @@ CHECK_INTERVAL = 300
 DB_DIR = "/data" if os.path.exists("/data") else "."
 DB_PATH = os.path.join(DB_DIR, "swgoh_news.db")
 
-print(f"📁 Usando base de datos en: {DB_PATH}")
+print(f"📁 Usando base de datos en: {DB_PATH}", flush=True)
 
 # --- Funciones de base de datos SQLite ---
 def init_database():
@@ -52,7 +52,7 @@ def init_database():
         conn.commit()
         conn.close()
         
-        print(f"✅ Base de datos inicializada correctamente")
+        print(f"✅ Base de datos inicializada correctamente", flush=True)
         return True
     except Exception as e:
         print(f"❌ Error al inicializar base de datos: {e}")
@@ -172,7 +172,7 @@ def send_to_discord(title, link, summary=""):
         return False
 
     payload = {
-        "content": "⚠️ ¡¡<@745741680430546954> hay nueva noticia de SWGOH!! ⚠️",
+        "content": "⚠️ ¡¡<@&745741680430546954> hay nueva noticia de SWGOH!! ⚠️",
         "embeds": [{
             "title": title,
             "url": link,
@@ -250,36 +250,40 @@ def fetch_and_send_news():
 # --- Bucle principal ---
 def bot_loop():
     """Bucle que revisa las noticias continuamente"""
-    print("🤖 Bot de noticias SWGOH iniciado")
-    print(f"⏰ Revisando cada {CHECK_INTERVAL} segundos")
+    print("🤖 Bot de noticias SWGOH iniciado", flush=True)
+    print(f"⏰ Revisando cada {CHECK_INTERVAL} segundos", flush=True)
     
     # Inicializar base de datos
+    print("🔧 Inicializando base de datos...", flush=True)
     db_ok = init_database()
     
     if db_ok:
         # Si es la primera vez, marcar noticias actuales como leídas
         initialize_existing_news()
     else:
-        print("⚠️ No se pudo inicializar la base de datos")
+        print("⚠️ No se pudo inicializar la base de datos", flush=True)
     
-    print("\n" + "="*50 + "\n")
+    print("\n" + "="*50 + "\n", flush=True)
 
     while True:
         try:
-            print(f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
             fetch_and_send_news()
         except Exception as e:
-            print(f"❌ Error en el ciclo principal: {e}")
+            print(f"❌ Error en el ciclo principal: {e}", flush=True)
             import traceback
             traceback.print_exc()
 
-        print(f"⏳ Esperando {CHECK_INTERVAL} segundos...")
+        print(f"⏳ Esperando {CHECK_INTERVAL} segundos...", flush=True)
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     # Iniciar Flask en un thread separado
     threading.Thread(target=run_web, daemon=True).start()
-    print("🌐 Servidor Flask iniciado en puerto 5000")
+    print("🌐 Servidor Flask iniciado en puerto 5000", flush=True)
+    
+    # Pequeña pausa para asegurar que Flask arrancó
+    time.sleep(1)
     
     # Ejecutar el bot en el thread principal
     bot_loop()
