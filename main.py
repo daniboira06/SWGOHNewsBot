@@ -24,7 +24,16 @@ def run_web():
 # --- CONFIGURACIÓN ---
 FORUM_URL = "https://forums.ea.com/category/star-wars-galaxy-of-heroes-en/blog/swgoh-game-info-hub-en"
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
-MONGODB_URI = os.getenv('MONGODB_URI', '')  # Nueva variable de entorno
+
+# Intentar obtener MONGODB_URI de diferentes formas
+MONGODB_URI = os.getenv('MONGODB_URI', '')
+if not MONGODB_URI:
+    MONGODB_URI = os.environ.get('MONGODB_URI', '')
+
+print(f"🔧 DEBUG: MONGODB_URI desde os.getenv: {'configurada' if os.getenv('MONGODB_URI') else 'vacía'}")
+print(f"🔧 DEBUG: MONGODB_URI desde os.environ: {'configurada' if os.environ.get('MONGODB_URI') else 'vacía'}")
+print(f"🔧 DEBUG: Todas las variables de entorno: {list(os.environ.keys())}")
+
 CHECK_INTERVAL = 300
 
 # --- Conexión a MongoDB ---
@@ -48,7 +57,12 @@ def init_database():
     
     try:
         print("   Creando cliente MongoDB...")
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
+        client = MongoClient(
+            MONGODB_URI, 
+            serverSelectionTimeoutMS=5000,  # 5 segundos
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000
+        )
         
         print("   Verificando conexión (ping)...")
         client.admin.command('ping')
@@ -279,3 +293,4 @@ if __name__ == "__main__":
     
     # Ejecutar el bot en el thread principal
     bot_loop()
+
