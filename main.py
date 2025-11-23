@@ -46,57 +46,65 @@ def init_database():
     safe_uri = MONGODB_URI[:20] + "***" + MONGODB_URI[-30:] if len(MONGODB_URI) > 50 else "URI muy corta"
     print(f"   URI (parcial): {safe_uri}")
     
-    try:
-        print("   Creando cliente MongoDB...")
-        import signal
-        
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Timeout al conectar a MongoDB")
-        
-        # Establecer timeout de 10 segundos para toda la operación
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(10)
-        
+    # Usar threading para timeout manual
+    import queue
+    result_queue = queue.Queue()
+    
+    def connect_with_timeout():
         try:
+            print("   [Thread] Creando cliente MongoDB...")
             client = MongoClient(
                 MONGODB_URI, 
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000,
-                socketTimeoutMS=5000
+                serverSelectionTimeoutMS=8000,
+                connectTimeoutMS=8000,
+                socketTimeoutMS=8000
             )
             
-            print("   Verificando conexión (ping)...")
-            result = client.admin.command('ping')
-            print(f"   Ping exitoso: {result}")
+            print("   [Thread] Verificando conexión (ping)...")
+            ping_result = client.admin.command('ping')
+            print(f"   [Thread] Ping exitoso: {ping_result}")
             
-            print("   Seleccionando base de datos...")
-            db = client['swgoh_bot']
-            sent_collection = db['sent_news']
+            print("   [Thread] Seleccionando base de datos...")
+            temp_db = client['swgoh_bot']
+            temp_collection = temp_db['sent_news']
             
-            print("   Creando índice...")
-            sent_collection.create_index("post_id", unique=True)
+            print("   [Thread] Creando índice...")
+            temp_collection.create_index("post_id", unique=True)
             
-            signal.alarm(0)  # Cancelar el timeout
+            result_queue.put(("success", client, temp_db, temp_collection))
+        except Exception as e:
+            result_queue.put(("error", e, None, None))
+    
+    print("   Iniciando thread de conexión...")
+    thread = threading.Thread(target=connect_with_timeout, daemon=True)
+    thread.start()
+    
+    print("   Esperando respuesta (máximo 12 segundos)...")
+    thread.join(timeout=12)
+    
+    if thread.is_alive():
+        print("⏱️ TIMEOUT: La conexión tardó más de 12 segundos")
+        print("   Posibles causas:")
+        print("   1. Network Access en MongoDB no permite 0.0.0.0/0")
+        print("   2. El cluster no está disponible")
+        print("   3. Firewall de Render bloqueando la conexión")
+        print("   Continuando sin base de datos...")
+        return False
+    
+    try:
+        status, result1, result2, result3 = result_queue.get_nowait()
+        
+        if status == "success":
+            db = result2
+            sent_collection = result3
             print("✅ Conectado a MongoDB correctamente")
             return True
-        except TimeoutError as e:
-            signal.alarm(0)
-            print(f"⏱️ Timeout: {e}")
-            print("   Esto puede significar:")
-            print("   - MongoDB Atlas aún no activó el acceso desde 0.0.0.0/0")
-            print("   - Hay un firewall bloqueando la conexión")
-            print("   - El cluster está en pausa o no disponible")
+        else:
+            print(f"❌ Error al conectar: {result1}")
+            print(f"   Tipo: {type(result1).__name__}")
             return False
-    except ConnectionFailure as e:
-        print(f"❌ Error de conexión a MongoDB: {e}")
-        print(f"   Tipo de error: ConnectionFailure")
-        return False
-    except Exception as e:
-        print(f"❌ Error inesperado con MongoDB: {e}")
-        print(f"   Tipo de error: {type(e).__name__}")
-        import traceback
-        print("   Traceback completo:")
-        traceback.print_exc()
+    except queue.Empty:
+        print("❌ No se recibió respuesta del thread de conexión")
         return False
 
 # --- Funciones de persistencia con MongoDB ---
