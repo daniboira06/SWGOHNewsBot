@@ -1,45 +1,45 @@
+import os
 import requests
 from bs4 import BeautifulSoup
-import time
-import os
 from datetime import datetime, timezone
 from flask import Flask
-import threading
-import sqlite3
-from pathlib import Path
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from apscheduler.schedulers.background import BackgroundScheduler
 
+# --- CONFIGURACIÓN ---
+FORUM_URL = "https://forums.ea.com/category/star-wars-galaxy-of-heroes-en/blog/swgoh-game-info-hub-en"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+# Variables de entorno para Postgres
+PG_HOST = os.getenv("PG_HOST", "localhost")
+PG_PORT = int(os.getenv("PG_PORT", 5432))
+PG_DB = os.getenv("PG_DB", "swgoh")
+PG_USER = os.getenv("PG_USER", "postgres")
+PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+
+# --- Flask ---
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "SWGOH Bot activo 😎"
 
-def run_web():
-    # Desactivar logs de Flask para que no ensucien la consola
-    import logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-    app.run(host="0.0.0.0", port=5000)
+# --- Base de datos ---
+def get_connection():
+    return psycopg2.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        dbname=PG_DB,
+        user=PG_USER,
+        password=PG_PASSWORD,
+        cursor_factory=RealDictCursor
+    )
 
-# --- CONFIGURACIÓN ---
-FORUM_URL = "https://forums.ea.com/category/star-wars-galaxy-of-heroes-en/blog/swgoh-game-info-hub-en"
-DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
-CHECK_INTERVAL = 300
-
-# Usar /data si existe (Render Disk), sino usar directorio local
-DB_DIR = "/data" if os.path.exists("/data") else "."
-DB_PATH = os.path.join(DB_DIR, "swgoh_news.db")
-
-print(f"📁 Usando base de datos en: {DB_PATH}", flush=True)
-
-# --- Funciones de base de datos SQLite ---
 def init_database():
-    """Inicializa la base de datos SQLite"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         cursor = conn.cursor()
-        
-        # Crear tabla si no existe
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS sent_news (
                 post_id TEXT PRIMARY KEY,
@@ -48,22 +48,19 @@ def init_database():
                 sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
         conn.commit()
         conn.close()
-        
-        print(f"✅ Base de datos inicializada correctamente", flush=True)
+        print("✅ Base de datos inicializada correctamente")
         return True
     except Exception as e:
         print(f"❌ Error al inicializar base de datos: {e}")
         return False
 
 def is_post_sent(post_id):
-    """Verifica si un post ya fue enviado"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM sent_news WHERE post_id = ?", (post_id,))
+        cursor.execute("SELECT 1 FROM sent_news WHERE post_id=%s", (post_id,))
         result = cursor.fetchone()
         conn.close()
         return result is not None
@@ -72,12 +69,11 @@ def is_post_sent(post_id):
         return False
 
 def mark_post_as_sent(post_id, title, link):
-    """Marca un post como enviado"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR IGNORE INTO sent_news (post_id, title, link) VALUES (?, ?, ?)",
+            "INSERT INTO sent_news (post_id, title, link) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
             (post_id, title, link)
         )
         conn.commit()
@@ -87,86 +83,28 @@ def mark_post_as_sent(post_id, title, link):
         print(f"❌ Error al guardar post: {e}")
         return False
 
-def cleanup_old_posts():
-    """Limpia posts antiguos (mantiene solo los últimos 100)"""
+def cleanup_old_posts(limit=100):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
         cursor = conn.cursor()
-        
-        # Contar posts
         cursor.execute("SELECT COUNT(*) FROM sent_news")
-        count = cursor.fetchone()[0]
-        
-        if count > 100:
-            # Eliminar los más antiguos
+        count = cursor.fetchone()['count']
+        if count > limit:
             cursor.execute('''
-                DELETE FROM sent_news 
+                DELETE FROM sent_news
                 WHERE post_id NOT IN (
-                    SELECT post_id FROM sent_news 
-                    ORDER BY sent_at DESC 
-                    LIMIT 100
+                    SELECT post_id FROM sent_news ORDER BY sent_at DESC LIMIT %s
                 )
-            ''')
+            ''', (limit,))
             deleted = cursor.rowcount
             conn.commit()
             print(f"🧹 Limpieza: eliminados {deleted} posts antiguos")
-        
         conn.close()
     except Exception as e:
         print(f"❌ Error en limpieza: {e}")
 
-def get_post_count():
-    """Obtiene el número de posts guardados"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM sent_news")
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-    except:
-        return 0
-
-# --- Inicialización: marcar noticias actuales como leídas ---
-def initialize_existing_news():
-    """Marca las noticias actuales del foro como ya leídas sin enviarlas"""
-    count = get_post_count()
-    
-    if count > 0:
-        print(f"📊 Base de datos ya tiene {count} noticias registradas")
-        return
-    
-    print("🔄 Primera ejecución: marcando noticias actuales como leídas...")
-    
-    try:
-        response = requests.get(FORUM_URL, timeout=15)
-        response.raise_for_status()
-        html = response.text
-    except Exception as e:
-        print(f"❌ Error al obtener la página: {e}")
-        return
-    
-    soup = BeautifulSoup(html, "html.parser")
-    posts = soup.select("h4 a[href*='/blog/swgoh-game-info-hub-en/']")[:5]
-    
-    for post in posts:
-        title = post.text.strip()
-        href = post.get("href")
-        
-        if not href:
-            continue
-        
-        link = f"https://forums.ea.com{href}"
-        post_id = href
-        
-        mark_post_as_sent(post_id, title, link)
-        print(f"  ✓ Marcada: {title}")
-    
-    print(f"✅ {len(posts)} noticias marcadas como leídas (no enviadas)\n")
-
 # --- Envío a Discord ---
 def send_to_discord(title, link, summary=""):
-    """Envía notificación a Discord"""
     if not DISCORD_WEBHOOK_URL:
         print("⚠️ No has configurado el webhook de Discord")
         return False
@@ -197,9 +135,7 @@ def send_to_discord(title, link, summary=""):
 
 # --- Revisión del foro ---
 def fetch_and_send_news():
-    """Revisa el foro y envía noticias nuevas"""
     print(f"\n🔍 Revisando foro: {FORUM_URL}")
-
     try:
         response = requests.get(FORUM_URL, timeout=15)
         response.raise_for_status()
@@ -208,6 +144,7 @@ def fetch_and_send_news():
         print(f"❌ Error al obtener la página: {e}")
         return False
 
+    from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "html.parser")
     posts = soup.select("h4 a[href*='/blog/swgoh-game-info-hub-en/']")[:5]
 
@@ -216,74 +153,59 @@ def fetch_and_send_news():
         return False
 
     new_items_found = False
-
     for post in posts:
         title = post.text.strip()
         href = post.get("href")
-
         if not href:
-            print(f"⚠️ Post sin link encontrado: {title}, ignorado.")
             continue
-
         link = f"https://forums.ea.com{href}"
         post_id = href
-
-        # Verificar si ya fue enviado
         if is_post_sent(post_id):
             print(f"⏭️ Ya enviado anteriormente: {title}")
             continue
 
-        # Nuevo post encontrado
         print(f"🆕 Nueva noticia detectada: {title}")
-        
-        if send_to_discord(title, link, summary=""):
+        if send_to_discord(title, link):
             if mark_post_as_sent(post_id, title, link):
                 print("💾 Post guardado en base de datos")
                 new_items_found = True
-                time.sleep(1)  # Pausa entre envíos
 
     if new_items_found:
         cleanup_old_posts()
-
     return new_items_found
 
-# --- Bucle principal ---
-def bot_loop():
-    """Bucle que revisa las noticias continuamente"""
-    print("🤖 Bot de noticias SWGOH iniciado", flush=True)
-    print(f"⏰ Revisando cada {CHECK_INTERVAL} segundos", flush=True)
-    
-    # Inicializar base de datos
-    print("🔧 Inicializando base de datos...", flush=True)
-    db_ok = init_database()
-    
-    if db_ok:
-        # Si es la primera vez, marcar noticias actuales como leídas
+# --- Inicialización ---
+def initialize_existing_news():
+    print("🔄 Marcando noticias actuales como leídas (si es la primera ejecución)...")
+    try:
+        response = requests.get(FORUM_URL, timeout=15)
+        response.raise_for_status()
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        posts = soup.select("h4 a[href*='/blog/swgoh-game-info-hub-en/']")[:5]
+        for post in posts:
+            title = post.text.strip()
+            href = post.get("href")
+            if not href:
+                continue
+            link = f"https://forums.ea.com{href}"
+            mark_post_as_sent(href, title, link)
+        print(f"✅ {len(posts)} noticias marcadas como leídas")
+    except Exception as e:
+        print(f"❌ Error inicializando noticias existentes: {e}")
+
+# --- Scheduler ---
+scheduler = BackgroundScheduler()
+scheduler.add_job(fetch_and_send_news, 'interval', minutes=5)
+scheduler.start()
+
+# --- Main ---
+if __name__ == "__main__":
+    if init_database():
         initialize_existing_news()
     else:
-        print("⚠️ No se pudo inicializar la base de datos", flush=True)
-    
-    print("\n" + "="*50 + "\n", flush=True)
+        print("⚠️ No se pudo inicializar la base de datos")
 
-    while True:
-        try:
-            print(f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-            fetch_and_send_news()
-        except Exception as e:
-            print(f"❌ Error en el ciclo principal: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+    print("🌐 Iniciando servidor Flask en puerto 5000")
+    app.run(host="0.0.0.0", port=5000)
 
-        print(f"⏳ Esperando {CHECK_INTERVAL} segundos...", flush=True)
-        time.sleep(CHECK_INTERVAL)
-
-if __name__ == "__main__":
-    # Iniciar Flask en un thread separado
-    threading.Thread(target=run_web, daemon=True).start()
-    print("🌐 Servidor Flask iniciado en puerto 5000", flush=True)
-    
-    # Pequeña pausa para asegurar que Flask arrancó
-    time.sleep(1)
-    
-    # Ejecutar el bot en el thread principal
-    bot_loop()
