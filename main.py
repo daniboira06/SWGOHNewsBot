@@ -48,26 +48,45 @@ def init_database():
     
     try:
         print("   Creando cliente MongoDB...")
-        client = MongoClient(
-            MONGODB_URI, 
-            serverSelectionTimeoutMS=5000,  # 5 segundos
-            connectTimeoutMS=5000,
-            socketTimeoutMS=5000
-        )
+        import signal
         
-        print("   Verificando conexión (ping)...")
-        result = client.admin.command('ping')
-        print(f"   Ping exitoso: {result}")
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Timeout al conectar a MongoDB")
         
-        print("   Seleccionando base de datos...")
-        db = client['swgoh_bot']
-        sent_collection = db['sent_news']
+        # Establecer timeout de 10 segundos para toda la operación
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(10)
         
-        print("   Creando índice...")
-        sent_collection.create_index("post_id", unique=True)
-        
-        print("✅ Conectado a MongoDB correctamente")
-        return True
+        try:
+            client = MongoClient(
+                MONGODB_URI, 
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000,
+                socketTimeoutMS=5000
+            )
+            
+            print("   Verificando conexión (ping)...")
+            result = client.admin.command('ping')
+            print(f"   Ping exitoso: {result}")
+            
+            print("   Seleccionando base de datos...")
+            db = client['swgoh_bot']
+            sent_collection = db['sent_news']
+            
+            print("   Creando índice...")
+            sent_collection.create_index("post_id", unique=True)
+            
+            signal.alarm(0)  # Cancelar el timeout
+            print("✅ Conectado a MongoDB correctamente")
+            return True
+        except TimeoutError as e:
+            signal.alarm(0)
+            print(f"⏱️ Timeout: {e}")
+            print("   Esto puede significar:")
+            print("   - MongoDB Atlas aún no activó el acceso desde 0.0.0.0/0")
+            print("   - Hay un firewall bloqueando la conexión")
+            print("   - El cluster está en pausa o no disponible")
+            return False
     except ConnectionFailure as e:
         print(f"❌ Error de conexión a MongoDB: {e}")
         print(f"   Tipo de error: ConnectionFailure")
