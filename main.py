@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask
 import threading
 from pymongo import MongoClient
@@ -35,27 +35,42 @@ def init_database():
     """Inicializa la conexión a MongoDB"""
     global db, sent_collection
     
+    print(f"🔍 Intentando conectar a MongoDB...")
+    print(f"   URI configurada: {'Sí' if MONGODB_URI else 'No'}")
+    
     if not MONGODB_URI:
         print("⚠️ MONGODB_URI no configurada. Usando modo fallback (memoria).")
         return False
     
+    # Mostrar parte de la URI (censurando password)
+    safe_uri = MONGODB_URI[:20] + "***" + MONGODB_URI[-30:] if len(MONGODB_URI) > 50 else "URI muy corta"
+    print(f"   URI (parcial): {safe_uri}")
+    
     try:
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        # Verificar conexión
+        print("   Creando cliente MongoDB...")
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
+        
+        print("   Verificando conexión (ping)...")
         client.admin.command('ping')
+        
+        print("   Seleccionando base de datos...")
         db = client['swgoh_bot']
         sent_collection = db['sent_news']
         
-        # Crear índice para búsquedas rápidas
+        print("   Creando índice...")
         sent_collection.create_index("post_id", unique=True)
         
         print("✅ Conectado a MongoDB correctamente")
         return True
     except ConnectionFailure as e:
-        print(f"❌ Error al conectar a MongoDB: {e}")
+        print(f"❌ Error de conexión a MongoDB: {e}")
+        print(f"   Tipo de error: ConnectionFailure")
         return False
     except Exception as e:
         print(f"❌ Error inesperado con MongoDB: {e}")
+        print(f"   Tipo de error: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # --- Funciones de persistencia con MongoDB ---
@@ -80,7 +95,7 @@ def mark_post_as_sent(post_id, title, link):
             "post_id": post_id,
             "title": title,
             "link": link,
-            "sent_at": datetime.utcnow()
+            "sent_at": datetime.now(timezone.utc)
         })
         return True
     except Exception as e:
@@ -120,7 +135,7 @@ def send_to_discord(title, link, summary=""):
             "description": summary[:2000] if summary else "Nueva noticia de SWGOH",
             "color": 3447003,
             "footer": {"text": "SWGOH - Game Info Hub"},
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }]
     }
 
@@ -135,6 +150,46 @@ def send_to_discord(title, link, summary=""):
     except Exception as e:
         print(f"❌ Error al enviar a Discord: {e}")
         return False
+
+# --- Inicialización: marcar noticias actuales como leídas ---
+def initialize_existing_news():
+    """Marca las noticias actuales del foro como ya leídas sin enviarlas"""
+    if sent_collection is None:
+        return
+    
+    # Verificar si ya hay datos en la base de datos
+    count = sent_collection.count_documents({})
+    if count > 0:
+        print(f"📊 Base de datos ya tiene {count} noticias registradas")
+        return
+    
+    print("🔄 Primera ejecución: marcando noticias actuales como leídas...")
+    
+    try:
+        response = requests.get(FORUM_URL, timeout=15)
+        response.raise_for_status()
+        html = response.text
+    except Exception as e:
+        print(f"❌ Error al obtener la página: {e}")
+        return
+    
+    soup = BeautifulSoup(html, "html.parser")
+    posts = soup.select("h4 a[href*='/blog/swgoh-game-info-hub-en/']")[:5]
+    
+    for post in posts:
+        title = post.text.strip()
+        href = post.get("href")
+        
+        if not href:
+            continue
+        
+        link = f"https://forums.ea.com{href}"
+        post_id = href
+        
+        mark_post_as_sent(post_id, title, link)
+        print(f"  ✓ Marcada: {title}")
+    
+    print(f"✅ {len(posts)} noticias marcadas como leídas (no enviadas)\n")
 
 # --- Revisión del foro ---
 def fetch_and_send_news():
@@ -199,6 +254,9 @@ def bot_loop():
     
     if not db_connected:
         print("⚠️ Continuando sin base de datos (solo para testing)")
+    else:
+        # Si es la primera vez, marcar noticias actuales como leídas
+        initialize_existing_news()
     
     print("\n" + "="*50 + "\n")
 
